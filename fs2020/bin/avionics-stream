@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -e
+
+PID_FILE=$HOME/avionics-stream.pid
+LOG_FILE=$HOME/avionics-stream.log
+if [ -f $PID_FILE ]; then
+  echo "Existing pid file found."
+  while read -ra numbers; do
+    for ((i=${#numbers[@]}-1; i>=0; i--)); do
+      PID=${numbers[i]}
+      echo "Stopping process #$PID"
+      kill -9 $PID || true
+      sleep 1
+    done
+  done < $PID_FILE
+  #rm -f $PID_FILE > /dev/null 2>&1
+fi
+rm -f $LOG_FILE > /dev/null 2>&1
+
+echo "Setting up video4 and video7 loopback devices..."
+pkexec bash -c '
+modprobe -r v4l2loopback && \
+modprobe v4l2loopback video_nr=4,7 card_label="PFD","MFD" exclusive_caps=1 max_buffers=4 fps=30
+'
+v4l2-ctl -d /dev/video0 --set-fmt-video=width=1920,height=1080,pixelformat=YUYV
+v4l2-ctl -d /dev/video0 --set-parm=60
+v4l2loopback-ctl set-fps 60 /dev/video4
+v4l2loopback-ctl set-fps 60 /dev/video7
+v4l2-ctl -d /dev/video4 -c timeout=1000
+v4l2-ctl -d /dev/video7 -c timeout=1000
+
+CROP_MODE=$(zenity --list --radiolist \
+  --title 'Select Crop Mode' \
+  --width 350 --height 250 \
+  --column '' --column 'Crop Mode' \
+  TRUE '1. Direct' \
+  FALSE '2. G1000 PFD and MFD' \
+  FALSE '3. Boeing PFD and ND' \
+  FALSE '4. Boeing PFD, ND and EICAS' \
+  | grep -Po '^\d+')
+
+case $CROP_MODE in
+  1) echo "Configuring for direct output."
+     OPTS_PROMPT=($(zenity --forms --title 'Video Options' \
+       --text 'ffplay Options:' \
+       --add-entry 'Width' --add-entry 'Height' \
+       --add-entry 'Top' --add-entry 'Left'))
+     read -d '|' -a VID_OPTS <<< $OPTS_PROMPT
+     ffplay /dev/video0 \
+       -vf "scale=${VID_OPTS[0]:=iw}:${VID_OPTS[1]:=ih}" \
+       -top ${VID_OPTS[2]:=0} -left ${VID_OPTS[3]:=0} \
+       -loglevel error >> $LOG_FILE 2>&1 &
+     echo $! > $PID_FILE
+     exit
+  ;;
+  2) echo "Configuring for G1000 system with PFD and MFD."
+     # "crop=w:h:x:y"
+     ffmpeg -nostdin -f v4l2 -i /dev/video0 -loglevel error \
+       -pix_fmt yuyv422 -filter_complex \
+       "[0:v]crop=960:715:0:210[out1];[0:v]crop=960:715:1000:210[out2]" \
+       -map [out1] -f v4l2 /dev/video4 -map [out2] -f v4l2 /dev/video7 \
+       >> $LOG_FILE 2>&1 &
+    echo "$!" >> $PID_FILE
+    sleep 2
+    ffplay -pixel_format yuyv422 /dev/video4 \
+      -window_title 'G1000 PFD' -top 10 -left 10 \
+      -loglevel error >> $LOG_FILE 2>&1 &
+    echo "$!" >> $PID_FILE
+    ffplay -pixel_format yuyv422 /dev/video7 \
+      -window_title 'G1000 MFD' -top 10 -left 10 \
+      -loglevel error >> $LOG_FILE 2>&1 &
+    echo "$!" >> $PID_FILE
+  ;;
+  3) echo "boeing 2"
+  ;;
+  4) echo "boeing 3"
+  ;;
+  *) echo "No crop mode specified. Will take no action and exit."
+     exit 1
+  ;;
+esac

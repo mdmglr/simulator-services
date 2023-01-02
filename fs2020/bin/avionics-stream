@@ -13,7 +13,7 @@ if [ -f $PID_FILE ]; then
       sleep 1
     done
   done < $PID_FILE
-  #rm -f $PID_FILE > /dev/null 2>&1
+  rm -f $PID_FILE > /dev/null 2>&1
 fi
 rm -f $LOG_FILE > /dev/null 2>&1
 
